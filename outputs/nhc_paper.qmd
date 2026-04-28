@@ -1,0 +1,563 @@
+---
+title: "Estimating the effect of Notting Hill Carnival on crime in London"
+author: 
+  - name: Matthew P J Ashby
+    orcid: 0000-0003-4201-9239
+    affiliation: 
+      name: University College London
+      department: Department of Security and Crime Science
+      address: 35 Tavistock Square, London WC1H 9EZ, United Kingdom
+    corresponding: true
+    email: matthew.ashby@ucl.ac.uk
+date: today
+date-format: long
+abstract: |
+  This article estimates how Notting Hill Carnival affects recorded crime within the carnival footprint and in surrounding areas. Using daily crime counts for small spatial units across London, the analysis compares carnival days with other late-summer and early-autumn days while accounting for persistent differences between places and shocks common to each date. The paper focuses on whether different offence types respond differently to the temporary concentration of people, guardianship, transport disruption and police activity associated with Carnival, and on the assumptions required to interpret the estimates causally.
+keywords:
+  - Notting Hill Carnival
+  - crime
+  - urban events
+  - causal inference
+  - spatial displacement
+  - London
+bibliography: "../../zotero_bibliography.bib"
+format:
+  pdf:
+    fig-cap-location: top
+    fig-dpi: 300
+    pdf-standard: ua-2
+execute:
+  echo: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+# Load the packages needed to render the paper and handle tabular results.
+pacman::p_load(ggtext, gt, here, janitor, scales, sf, tidyverse)
+```
+
+```{r}
+#| label: functions
+extract_file_type <- function(df) {
+  df |>
+    mutate(
+      file = str_remove(
+        file,
+        str_glue("{here()}/derived_data/nhc_(coef|extra|stats)_")
+      ),
+      file = str_remove(file, "\\.rds"),
+      file = str_remove(file, crime_group),
+      file = str_remove(file, "_$"),
+      file = if_else(file == "", "overall", file)
+    )
+}
+
+label_crime_types <- function(df) {
+  df |>
+    mutate(
+      crime_group = replace_values(
+        str_replace_all(crime_group, "_", " "),
+        "commercial business burglary" ~ "commercial burglary",
+        "theft from person" ~ "theft from the person",
+        "violence injury homicide" ~ "violence with injury",
+        "violence no injury" ~ "violence without injury"
+      )
+    )
+}
+```
+
+```{r}
+#| label: load-data
+#| include: false
+# Original data
+crimes <- here("derived_data/crimes.rds") |>
+  read_rds() |>
+  mutate(
+    crime_group = case_when(
+      new_minor_text %in% c("Violence with Injury", "Homicide") ~
+        "violence_injury_homicide",
+      new_minor_text == "Violence without Injury" ~
+        "violence_no_injury",
+      new_minor_text == "Robbery of Personal Property" ~
+        "personal_robbery",
+      new_minor_text == "Theft from Person" ~
+        "theft_from_person",
+      new_minor_text == "Bicycle Theft" ~
+        "bicycle_theft",
+      new_major_text == "Arson and Criminal Damage" ~ "criminal_damage",
+      new_minor_text %in%
+        c("Burglary - Residential", "Domestic Burglary") ~
+        "residential_burglary",
+      new_minor_text %in%
+        c(
+          "Burglary - Business and Community",
+          "Burglary Business and Community"
+        ) ~
+        "commercial_business_burglary",
+      new_major_text == "Sexual Offences" ~ "sexual_offences",
+      new_major_text == "Vehicle Offences" ~ "vehicle_theft",
+      TRUE ~ NA_character_
+    )
+  )
+
+# Spatial data
+footprint <- here("original_data", "NHC operational footprint.kml") |>
+  read_sf() |>
+  clean_names()
+london <- here("derived_data/london_boundary.gpkg") |>
+  read_sf() |>
+  st_transform("EPSG:4326")
+hex_grid <- here("derived_data/nhc_hex_grid_350m.gpkg") |>
+  read_sf() |>
+  st_transform("EPSG:4326")
+
+# Model data
+
+# Model statistics
+model_stats <- here("derived_data") |>
+  dir(pattern = "nhc_stats_", full.names = TRUE) |>
+  set_names() |>
+  map(read_rds) |>
+  bind_rows(.id = "file") |>
+  extract_file_type()
+
+# Model coefficients
+model_coef <- here("derived_data") |>
+  dir(pattern = "nhc_coef", full.names = TRUE) |>
+  set_names() |>
+  map(read_rds) |>
+  bind_rows(.id = "file") |>
+  extract_file_type() |>
+  mutate(
+    across(c(estimate, conf.low, conf.high), exp),
+    dist_band = parse_number(term)
+  )
+
+# Modelled extra crimes
+model_extra <- here("derived_data") |>
+  dir(pattern = "nhc_extra", full.names = TRUE) |>
+  set_names() |>
+  map(read_rds) |>
+  bind_rows(.id = "file") |>
+  extract_file_type()
+
+# Weights for creating weighted averages of crime types within each model
+crime_weights <- crimes |>
+  count(crime_group, minor = new_minor_text) |>
+  filter(!is.na(crime_group)) |>
+  mutate(
+    type = replace_values(
+      minor,
+      c("Aggravated Vehicle Taking", "Theft or Taking of a Motor Vehicle") ~
+        "Theft of Vehicle",
+      c("Interfering with a Motor Vehicle", "Theft from a Motor Vehicle") ~
+        "Theft from Vehicle"
+    )
+  ) |>
+  summarise(n = sum(n), .by = c(crime_group, type)) |>
+  mutate(prop = n / sum(n), .by = crime_group)
+
+# Costs of crime
+# These are estimated costs of crime in 2015/16 prices as estimated by the Home
+# Office. They are then updated to 2026 prices using the Bank of England
+# inflation calculator. Where a model covers multiple crime types, the cost per
+# crime is calculated as a weighted average of the relevant crime groups.
+# Source: https://www.gov.uk/government/publications/the-economic-and-social-costs-of-crime
+crime_costs <- tribble(
+  ~crime_group                   , ~cost_per_crime_2015                                                                                                                                      ,
+  "bicycle_theft"                , NA                                                                                                                                                        ,
+  "commercial_business_burglary" ,                                                                                                                                                     15460 ,
+  "criminal_damage"              , 8420 * pluck(filter(crime_weights, type == "Arson"), "prop", 1) + 1350 * pluck(filter(crime_weights, type == "Criminal Damage"), "prop", 1)               ,
+  "personal_robbery"             ,                                                                                                                                                     11320 ,
+  "residential_burglary"         ,                                                                                                                                                      5930 ,
+  "sexual_offences"              , 39360 * pluck(filter(crime_weights, type == "Rape"), "prop", 1) + 6520 * pluck(filter(crime_weights, type == "Other Sexual Offences"), "prop", 1)         ,
+  "theft_from_person"            ,                                                                                                                                                      1380 ,
+  "vehicle_theft"                , 10290 * pluck(filter(crime_weights, type == "Theft of Vehicle"), "prop", 1) + 870 * pluck(filter(crime_weights, type == "Theft from Vehicle"), "prop", 1) ,
+  "violence_injury_homicide"     , 3217740 * pluck(filter(crime_weights, type == "Homicide"), "prop", 1) + 14050 * pluck(filter(crime_weights, type == "Violence with Injury"), "prop", 1)   ,
+  "violence_no_injury"           ,                                                                                                                                                      5930
+) |>
+  mutate(cost_per_crime_2026 = cost_per_crime_2015 * 1.39)
+
+model_sig <- model_stats |>
+  filter(file == "overall", joint_band_test_p_value < 0.05) |>
+  pull(crime_group)
+```
+
+# Introduction
+
+Open by using Notting Hill Carnival as a case for understanding how large, temporary urban events affect crime. The first paragraph should establish Carnival as a socially and culturally important event that transforms a residential and commercial part of west London for two days each year. It should then introduce the practical policy concern: large events can create crime opportunities, concentrate potential victims and offenders, change guardianship and policing, and alter movement patterns across the wider city.
+
+State the main research question clearly: what effect does Notting Hill Carnival have on different types of crime within the carnival footprint and in surrounding areas? Make clear that the paper estimates effects separately for violence, personal theft and robbery, criminal damage, residential burglary, sexual offences and vehicle theft. Emphasise that these crime types may respond through different mechanisms, so the article should not treat "crime" as a single outcome.
+
+Set up the causal ambition of the paper. The introduction should say that the analysis makes causal claims under an explicit identifying assumption: after accounting for stable differences between small places and date-specific shocks affecting London as a whole, the remaining timing of Carnival provides a reasonable counterfactual for crime that would have occurred in the same places on the same dates if Carnival had not taken place. Flag that this assumption is plausible but not directly testable, and that the paper assesses its credibility through design choices, spatial comparisons, crime-type heterogeneity and sensitivity checks.
+
+End the introduction with a concise contribution statement. The paper contributes to research on event-related crime, environmental criminology, urban governance and causal analysis of place-based interventions by estimating offence-specific effects across a fine-grained spatial gradient rather than only inside an event boundary.
+
+# Background: Large Events, Urban Space and Crime
+
+This section should make the paper accessible to criminology and urban studies readers by explaining the mechanisms in plain language before introducing disciplinary terminology. Organise the discussion around how a planned event changes the routine use of urban space.
+
+Discuss why crime might increase during Carnival:
+
+- Carnival brings many more people into a small area, increasing potential targets for personal theft, robbery and sexual offences.
+- Crowding, alcohol consumption and late-night activity may increase disputes or opportunities for violence.
+- Temporary changes in transport, street access and informal social control may affect where crimes occur.
+- Police deployment may increase detection and recording for some offences while deterring others.
+
+Discuss why crime might decrease or move:
+
+- Heavy police presence and stewarding may suppress some offences inside the footprint.
+- Residents may change behaviour by leaving the area, staying indoors or securing property differently.
+- Road closures and crowd management may reduce vehicle access and some vehicle-related opportunities.
+- Crime opportunities may be displaced to nearby areas, transit corridors or other parts of London.
+
+Use this discussion to justify the spatial design. The theory should motivate estimating effects separately within the Carnival footprint, in successive distance bands around the footprint and across London as a whole.
+
+# Research Questions and Expectations
+
+List the paper's research questions in a small set of direct questions.
+
+1. Does recorded crime increase or decrease inside the Notting Hill Carnival footprint on Carnival days?
+2. Do effects vary by offence type?
+3. Are there detectable changes in nearby areas, consistent with spillover, displacement or diffusion of guardianship?
+4. What is the estimated London-wide change in recorded crime on Carnival days after accounting for local increases and decreases?
+
+The expectations should be cautious rather than framed as strong hypotheses. The paper can expect larger positive effects for personal theft and robbery within or near the footprint because the event concentrates suitable targets. The direction for violence and sexual offences should be framed as ambiguous because increased opportunities may be offset by police presence and reporting dynamics. Residential burglary and vehicle theft may show weaker or more spatially diffuse effects because Carnival changes residential occupancy, vehicle access and guardianship in competing ways. Criminal damage may plausibly increase in crowded or heavily used public spaces, but could also be deterred inside the managed footprint.
+
+# Data
+
+Describe the crime data source as Metropolitan Police Service recorded crime data covering London from 2013 to 2023. Explain that the analysis uses offences recorded with dates and spatial coordinates, assigned to 350-metre hexagonal cells across London.
+
+Explain the study period. The panel keeps July, August, September and October to compare Carnival days with days in the same broad season, reducing the risk that estimates are driven by annual seasonality. Note that September 2019 is excluded because those data are missing, and that 2020 and 2021 Carnival dates are not treated as Carnival days because the event did not take place in its usual form during the COVID-19 pandemic.
+
+Describe the crime groups:
+
+- Violence against the person.
+- Personal theft and robbery, combining theft from person and robbery of personal property.
+- Criminal damage.
+- Residential burglary.
+- Sexual offences.
+- Vehicle theft and related vehicle offences.
+
+Describe the spatial treatment definition. The Carnival footprint is based on the operational footprint file. Hexagons are classified by the distance from their centroid to this footprint: cells whose centroid falls inside the footprint are coded as 0 km, then cells are grouped into one-kilometre distance bands up to 12 km, with the 12 km band serving as the comparison category in the main model.
+
+Include a figure plan:
+
+- Map of London showing the Carnival footprint, 350-metre hexagons and distance bands.
+- Small inset map of the Carnival area and immediate surrounding bands.
+- Descriptive plot of average daily crime counts by distance band on Carnival and non-Carnival days.
+
+# Methods
+
+Describe the design as a spatial panel event study estimated with fixed-effects Poisson models for count outcomes. Avoid relying only on technical notation; explain that the model compares the same small places over time and compares all places on the same date, while allowing Carnival effects to vary by distance from the footprint.
+
+Present the main model in words and, if useful, as an equation:
+
+$$
+E(Y_{gdt}) = \exp(\alpha_g + \delta_t + \sum_b \beta_b D_{gb} Carnival_t)
+$$
+
+where \(Y_{gdt}\) is the count of a given crime type in hexagon \(g\) on date \(t\), \(\alpha_g\) are hexagon fixed effects, \(\delta_t\) are date fixed effects, \(D_{gb}\) indicates the distance band and \(Carnival_t\) indicates Carnival days. The 12 km band is the reference category, so coefficients estimate the difference in Carnival-day change for each band relative to outer London.
+
+Explain why fixed effects matter. Hexagon fixed effects account for stable differences between places, such as land use, transport access, nightlife density and baseline crime levels. Date fixed effects account for London-wide shocks on each day, such as weather, holidays, day of week, year-specific patterns and other city-wide events.
+
+Explain inference. Standard errors are clustered by hexagon to allow repeated observations within the same place to be correlated over time.
+
+Explain the counterfactual extra-crime estimates. After estimating each model, predicted crime on Carnival days is compared with predicted crime for the same hexagons and dates after setting the Carnival indicator to zero. These differences are summed by distance band and for London overall. This turns log-rate model coefficients into estimated additional or fewer recorded crimes, which is easier for non-specialist readers to interpret.
+
+State the causal identifying assumptions explicitly:
+
+- No unobserved local shocks coincide with Carnival in ways that differentially affect the Carnival area or nearby bands relative to the 12 km comparison band after date fixed effects are included.
+- The 12 km band provides an appropriate estimate of the London-wide Carnival-day counterfactual trend for the more exposed bands.
+- Any changes in police deployment, reporting behaviour or recording practices are part of the event effect being estimated, or at least do not bias comparisons in ways that undermine the substantive interpretation.
+- Spillovers beyond the measured bands are either captured by the London-wide estimates or small enough that the 12 km band remains a useful reference category.
+
+Be transparent that the design estimates the effect of Carnival as an event package, not the separate effect of crowding, policing, alcohol availability, transport changes or cultural participation.
+
+# Results
+
+Start with a descriptive subsection. Show how recorded crime varies by offence type, distance from the Carnival footprint and Carnival-day status. Use this to orient readers before presenting model estimates.
+
+Then present model results by offence type. For each offence type, report both relative effects from the model and extra-crime estimates in counts. The writing should prioritise substantive interpretation over coefficient tables. For example, say whether estimated changes are concentrated inside the footprint, extend to nearby bands or appear as city-wide changes.
+
+Suggested results subsections:
+
+## Violence
+
+Describe whether violence increases, decreases or remains uncertain inside the footprint and nearby bands. Interpret the pattern in relation to crowding, guardianship, alcohol and police presence. Note whether any effects appear spatially concentrated or diffuse.
+
+## Personal Theft and Robbery
+
+This is likely to be a central outcome because Carnival concentrates potential targets in crowded public space. Focus on whether the largest effects occur in the footprint or immediately surrounding areas, and whether the London-wide estimate suggests additional crime rather than spatial redistribution.
+
+## Criminal Damage
+
+Interpret any changes in relation to public-space use, crowd movement, temporary infrastructure and police/steward presence. Distinguish clearly between imprecise estimates and evidence of no meaningful effect.
+
+## Residential Burglary
+
+Discuss residential burglary as a theoretically distinct outcome. Carnival may change occupancy, guardianship and access to residential streets. If estimates are weak or uncertain, frame this as informative evidence that not all crime types respond in the same way to the event.
+
+## Sexual Offences
+
+Handle this outcome carefully. Discuss recorded sexual offences as a combination of victimisation, reporting and recording processes. Avoid implying that null or uncertain estimates mean absence of harm. If estimates are positive, emphasise uncertainty and the importance of interpreting police-recorded data cautiously.
+
+## Vehicle Theft
+
+Interpret vehicle-related outcomes in light of road closures, parking restrictions, crowd management and changes in vehicle availability near the footprint.
+
+End the results with a synthesis table:
+
+- Rows: crime groups.
+- Columns: estimated extra crimes inside the footprint, nearby bands, 0-12 km total and London-wide total.
+- Include confidence intervals and a short text column summarising the spatial pattern.
+
+# Robustness and Sensitivity Checks
+
+This section should report checks that help readers assess whether causal claims are credible. Include only checks that are actually implemented, but the draft should reserve space for the following:
+
+- Alternative spatial resolutions, such as comparing 350-metre and 500-metre hexagons if both panels are retained.
+- Alternative comparison bands, such as excluding the 12 km band or using a wider outer-London reference if feasible.
+- Placebo dates in nearby non-Carnival periods to test whether similar "effects" appear when no event occurred.
+- Separate estimates for Sunday and Monday if the two Carnival days plausibly differ in attendees, policing or activities.
+- Sensitivity to excluding years or periods affected by missing data or unusual event conditions.
+- Checks for pre-existing spatial differences in late-summer crime trends.
+
+Make clear that these checks do not prove causality but help assess whether the design behaves as expected.
+
+# Discussion
+
+Return to the main question: what effect does Notting Hill Carnival have on different types of crime within the footprint and surrounding areas? Summarise the central empirical pattern in accessible language, focusing on offence-specific and spatially patterned effects.
+
+Discuss mechanisms cautiously. Link observed patterns to routine activity theory, crowding, guardianship, mobility and urban event management, but avoid claiming to identify mechanisms directly unless the data support that claim. For example, an increase in personal theft near the footprint is consistent with target concentration in crowded public space, but the model alone does not prove offender motivation or movement.
+
+Discuss the meaning of the London-wide estimates. If local increases are offset elsewhere, that would suggest redistribution or changed recording patterns. If London-wide totals increase, that would suggest Carnival generates additional recorded crime rather than merely moving it around. If estimates differ by offence type, emphasise that event-related crime is not a single process.
+
+Include a paragraph on equity and governance. Carnival is a culturally significant event with a history tied to Black British and Caribbean communities, so the paper should avoid reducing Carnival to a crime problem. The discussion should balance public-safety evidence with recognition of the event's social value and the risks of stigmatizing communities or cultural celebration.
+
+# Limitations
+
+Be explicit about limits to causal interpretation:
+
+- The design cannot randomise Carnival timing or location.
+- The estimates depend on the 12 km band being a credible reference for exposed areas after fixed effects.
+- The analysis uses recorded crime, which reflects reporting, police presence and recording practices as well as underlying victimisation.
+- The treatment is the full Carnival event package, not any single component of event management.
+- Spatial bands are based on hexagon centroids and the operational footprint, which may not perfectly capture attendee movement, transport flows or police deployment.
+- Some offences are rare, making estimates less precise.
+- The analysis covers late-summer and early-autumn months, so the counterfactual is seasonal rather than year-round.
+
+# Conclusion
+
+Conclude by restating the substantive finding in terms of offence-specific event effects and spatial reach. The final paragraph should emphasise the broader lesson: large urban events can reshape crime opportunities in ways that are local, offence-specific and tied to city-wide movement and governance. The paper should close with implications for evidence-informed event planning: safety strategies should be tailored by offence type and spatial zone, while maintaining sensitivity to the cultural value of Carnival.
+
+# Tables and Figures to Create
+
+Use this section as a production checklist while drafting.
+
+- Table 1: Study design summary, including years, months, spatial unit, treatment dates, comparison band and crime groups.
+- Table 2: Descriptive counts by crime group, Carnival-day status and distance band.
+- Table 3: Main estimated extra crimes by crime group and distance band.
+- Table 4: London-wide extra-crime estimates by crime group.
+- Figure 1: Map of Carnival footprint and distance bands.
+- Figure 2: Descriptive Carnival versus non-Carnival crime rates by distance band.
+- Figure 3: Coefficient plot of distance-band effects by crime group.
+- Figure 4: Extra-crime estimates with confidence intervals by crime group and distance band.
+- Figure 5: Sensitivity-check summary plot.
+
+# Notes for Drafting Tone
+
+Write for criminology, urban studies, geography, sociology, public policy and policing audiences. Define specialist terms the first time they appear. Use "recorded crime" unless referring more generally to the theoretical process of offending or victimisation. Avoid language that frames Carnival itself as deviant or criminogenic; the object of study is how a large urban event changes opportunities, guardianship, mobility, reporting and police activity.
+
+Keep causal language precise. Use "effect" when referring to the model-based causal estimand under the stated assumptions. Use "association", "pattern" or "consistent with" when discussing descriptive results or mechanisms that are not directly identified.
+
+
+
+```{r}
+#| label: fig-coef
+model_coef |>
+  filter(file == "overall") |>
+  label_crime_types() |>
+  mutate(sig = p.value < 0.05) |>
+  ggplot() +
+  aes(
+    x = dist_band,
+    y = estimate,
+    ymin = conf.low,
+    ymax = conf.high,
+    color = sig
+  ) +
+  geom_hline(yintercept = 1) +
+  geom_pointrange() +
+  scale_x_continuous(breaks = unique(pull(model_coef, dist_band))) +
+  scale_y_continuous(
+    transform = transform_log(),
+    labels = label_number(accuracy = 0.01),
+    expand = expansion()
+  ) +
+  scale_colour_manual(values = c("FALSE" = "grey70", "TRUE" = "black")) +
+  facet_wrap(vars(crime_group), scales = "free_y") +
+  labs(x = "distance from carnival footprint", y = "rate ratio") +
+  theme_minimal() +
+  theme(
+    axis.ticks.x = element_line(colour = "grey80"),
+    legend.position = "none",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank()
+  )
+```
+
+
+```{r}
+#| label: tbl-extra
+model_extra |>
+  # Keep only crimes within the carnival footprint
+  filter(file == "overall", dist == "0km") |>
+  select(crime_group, extra_in_footprint = extra_crimes) |>
+  # Join the total crimes for each type
+  left_join(
+    filter(model_extra, file == "overall", dist == "all_london"),
+    by = join_by(crime_group)
+  ) |>
+  # Join crime costs
+  left_join(crime_costs, by = join_by(crime_group)) |>
+  # Keep only type with significant extra crimes
+  filter(extra_crimes_conf_low > 0 | extra_crimes_conf_high < 0) |>
+  mutate(
+    prop_in_footprint = extra_in_footprint / extra_crimes,
+    prop_of_london = extra_crimes / observed_nhc,
+    # Calculate total cost of extra crimes
+    across(
+      starts_with("extra_crimes"),
+      \(x) x * cost_per_crime_2026,
+      .names = "cost_{.col}"
+    ),
+    # Format extra crime estimates for presentation
+    across(
+      starts_with("extra_crimes"),
+      \(x) number(x, accuracy = 1, style_negative = "minus")
+    ),
+    extra_conf = str_glue(
+      "{extra_crimes_conf_low}--{extra_crimes_conf_high}"
+    ),
+    # Format crime costs for presentation
+    across(starts_with("cost"), \(x) comma(x, accuracy = 1, scale = 1e-3)),
+    costs_conf = str_glue(
+      "{cost_extra_crimes_conf_low}--{cost_extra_crimes_conf_high}"
+    )
+  ) |>
+  select(
+    crime_group,
+    extra_crimes,
+    extra_conf,
+    prop_in_footprint,
+    prop_of_london,
+    cost_extra_crimes,
+    costs_conf
+  ) |>
+  label_crime_types() |>
+  gt() |>
+  cols_align(-crime_group, align = "right") |>
+  cols_label(
+    crime_group = "crime type",
+    extra_crimes = "estimate",
+    extra_conf = "95% confidence interval",
+    prop_in_footprint = "proportion of additional crimes occurring in the carnival footprint",
+    prop_of_london = "proportion of London crimes on carnival days attributable to carnival",
+    cost_extra_crimes = "estimate",
+    costs_conf = "95% confidence interval"
+  ) |>
+  tab_spanner(
+    label = "estimated annual additional crimes in London due to carnival",
+    columns = c(extra_crimes, extra_conf),
+    id = "spanner_crimes"
+  ) |>
+  tab_spanner(
+    label = "estimated annual social cost of additional crimes in London due to carnival",
+    columns = c(cost_extra_crimes, costs_conf),
+    id = "spanner_costs"
+  ) |>
+  fmt_markdown(columns = c(extra_conf, costs_conf)) |>
+  fmt_percent(
+    columns = c(prop_in_footprint, prop_of_london),
+    decimals = 1
+  ) |> 
+  tab_footnote(
+    footnote = "costs estimated by Heeks et al. (2018) and updated to 2026 prices",
+    locations = cells_column_spanners(spanners = "spanner_costs"))
+  )
+```
+
+
+```{r}
+#| label: fig-extra
+model_extra |>
+  filter(file == "overall", dist_km < 12, crime_group %in% model_sig) |>
+  label_crime_types() |>
+  mutate(sig = (extra_crimes_conf_low > 0 | extra_crimes_conf_high < 0)) |>
+  ggplot() +
+  aes(
+    x = dist_km,
+    y = extra_crimes,
+    ymin = extra_crimes_conf_low,
+    ymax = extra_crimes_conf_high,
+    colour = sig
+  ) +
+  geom_hline(yintercept = 0) +
+  geom_pointrange() +
+  scale_x_continuous(breaks = unique(pull(model_extra, dist_km))) +
+  scale_y_continuous(
+    labels = label_number(style_negative = "minus"),
+    n.breaks = 6,
+    expand = expansion()
+  ) +
+  scale_colour_manual(values = c("FALSE" = "grey70", "TRUE" = "black")) +
+  facet_wrap(vars(crime_group), ncol = 4, scales = "free_y") +
+  labs(
+    x = "distance from carnival footprint",
+    y = "estimated annual crimes due to carnival"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.ticks.x = element_line(colour = "grey80"),
+    legend.position = "none",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank()
+  )
+```
+
+
+
+```{r}
+#| label: fig-bands
+ggplot() +
+  ggspatial::annotation_map_tile(type = "cartolight", zoomin = 1) +
+  ggspatial::annotation_spatial(
+    data = st_difference(london, st_buffer(london, 100000)),
+    alpha = 0.5,
+    fill = "white"
+  ) +
+  geom_sf(data = london, colour = "black", fill = NA, linewidth = 1) +
+  geom_sf(data = footprint, fill = "grey70", linewidth = 0.75) +
+  geom_sf(
+    data = summarise(hex_grid, across(geom, st_union), .by = dist_km),
+    colour = "grey50",
+    fill = NA
+  ) +
+  theme_void()
+```
+
+
+```{r}
+#| label: fig-footprint
+ggplot() +
+  ggspatial::annotation_map_tile(type = "cartolight", zoomin = 0) +
+  ggspatial::annotation_spatial(
+    data = st_difference(london, footprint),
+    alpha = 0.5,
+    fill = "white"
+  ) +
+  geom_sf(data = footprint, fill = NA, linewidth = 0.75) +
+  theme_void()
+```
