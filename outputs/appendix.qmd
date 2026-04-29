@@ -1,0 +1,60 @@
+---
+title: "Untitled"
+format: html
+---
+
+
+```{r}
+#| label: fig-event-study
+nhc_event_study_coef |>
+  mutate(
+    term = str_remove(term, "dist::"),
+    term = str_remove(term, "nhc_event_day::"),
+    sig = (conf.low > 0 | conf.high < 0)
+  ) |>
+  separate(term, into = c("dist", "day"), sep = ":") |>
+  mutate(
+    day = factor(
+      replace_values(
+        day,
+        "friday_before" ~ "Fr",
+        "saturday_before" ~ "Sa",
+        "carnival_sunday" ~ "Su",
+        "carnival_monday" ~ "Mo",
+        "tuesday_after" ~ "Tu",
+        "wednesday_after" ~ "We"
+      ),
+      levels = c("Fr", "Sa", "Su", "Mo", "Tu", "We")
+    ),
+    dist = fct_reorder(dist, parse_number(dist))
+  ) |>
+  ggplot() +
+  aes(
+    x = day,
+    y = exponentiated_estimate,
+    ymin = exponentiated_conf_low,
+    ymax = exponentiated_conf_high,
+    colour = sig
+  ) +
+  geom_vline(
+    xintercept = c("Su", "Tu"),
+    colour = "grey50",
+    linetype = "11",
+    position = position_nudge(x = -0.5)
+  ) +
+  geom_hline(yintercept = 1, colour = "grey70") +
+  geom_pointrange(size = 0.25) +
+  facet_grid(cols = vars(dist), rows = vars(crime_group), scales = "free_y") +
+  scale_y_continuous(
+    transform = scales::transform_log(),
+    labels = scales::label_number(accuracy = 0.1)
+  ) +
+  scale_colour_manual(values = c(`TRUE` = "black", `FALSE` = "grey")) +
+  theme_minimal() +
+  theme(
+    axis.text.x.bottom = element_text(angle = 90, hjust = 1),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    strip.text.y = element_text(angle = 0)
+  )
+```

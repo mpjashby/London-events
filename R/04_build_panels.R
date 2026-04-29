@@ -93,7 +93,9 @@ nhc_grid <- st_make_grid(london_boundary, cellsize = 350, square = FALSE) |>
 # the analysis groups used for separate models.
 nhc_crime_counts <- crimes |>
   mutate(
-    crime_date = as_date(date_committed_from),
+    # Shift overnight crimes to the previous analysis day so that daily counts
+    # run from 05:00 on each date to 04:59 on the following date.
+    crime_date = as_date(date_committed_from - hours(5)),
     crime_group = case_when(
       new_minor_text %in% c("Violence with Injury", "Homicide") ~
         "violence_injury_homicide",
