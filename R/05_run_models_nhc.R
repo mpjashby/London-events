@@ -165,9 +165,15 @@ nhc_placebo_dates <- nhc_panel |>
 # the Monday immediately following it.
 nhc_panel <- nhc_panel |>
   mutate(
-    nhc_placebo_sunday = as.numeric(crime_date %in% nhc_placebo_dates$placebo_sunday_date),
-    nhc_placebo_monday = as.numeric(crime_date %in% nhc_placebo_dates$placebo_monday_date),
-    is_nhc_placebo = as.numeric(nhc_placebo_sunday == 1 | nhc_placebo_monday == 1)
+    nhc_placebo_sunday = as.numeric(
+      crime_date %in% nhc_placebo_dates$placebo_sunday_date
+    ),
+    nhc_placebo_monday = as.numeric(
+      crime_date %in% nhc_placebo_dates$placebo_monday_date
+    ),
+    is_nhc_placebo = as.numeric(
+      nhc_placebo_sunday == 1 | nhc_placebo_monday == 1
+    )
   )
 
 # MODEL FUNCTION FOR PLACEBO CARNIVAL DAYS ---------------------------------
@@ -185,7 +191,10 @@ fit_nhc_placebo_model <- function(crime_type) {
 
   # Store the path for the saved placebo model so it follows the project naming
   # convention for reusable model outputs.
-  model_path <- here("derived_data", str_glue("nhc_model_placebo_{crime_type}.rds"))
+  model_path <- here(
+    "derived_data",
+    str_glue("nhc_model_placebo_{crime_type}.rds")
+  )
 
   # Save the fitted placebo model using compression because the fixed-effects
   # model objects are large.
@@ -225,4 +234,3 @@ nhc_placebo_model_files <- nhc_crime_groups |>
 # Return the future backend to sequential processing after the placebo model
 # run.
 plan(sequential)
-

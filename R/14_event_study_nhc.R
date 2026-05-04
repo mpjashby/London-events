@@ -2,6 +2,7 @@
 # coefficients and handle the panel data.
 pacman::p_load(
   broom,
+  cli,
   fixest,
   here,
   lubridate,
@@ -10,7 +11,7 @@ pacman::p_load(
 
 # Increase the memory allocation available to R because the daily panel and
 # fixed-effects model objects can be large.
-mem.maxVSize(mem.maxVSize() * 4)
+mem.maxVSize(mem.maxVSize() * 6)
 
 # LOAD PANEL DATA -----------------------------------------------------------
 
@@ -81,6 +82,33 @@ nhc_event_panel <- nhc_panel |>
 # Store the event-window days that are explicitly estimated in the model.
 nhc_event_days <- nhc_event_day_levels |>
   setdiff("outside_window")
+
+# Count unexpected missing values in an object, including values stored inside
+# list columns, so saved result files can be checked before large model files
+# are deleted.
+count_missing_values <- function(result_object) {
+  # Ignore the expected missing distance value on the London-wide event-study
+  # rows, because those rows aggregate across all distance bands.
+  if (
+    is.data.frame(result_object) &&
+      all(c("dist", "dist_km") %in% names(result_object))
+  ) {
+    result_object <- result_object |>
+      mutate(
+        dist_km = if_else(dist == "all_london", 0, dist_km)
+      )
+  }
+
+  # Recurse into list-like objects so nested vectors, matrices and data frames
+  # are all included in the missing-value count.
+  if (is.list(result_object)) {
+    return(sum(map_int(result_object, count_missing_values)))
+  }
+
+  # Count missing values in atomic objects once all nested structures have been
+  # traversed.
+  sum(is.na(result_object))
+}
 
 # MODEL FUNCTION ------------------------------------------------------------
 
@@ -392,23 +420,286 @@ nhc_event_study_extra <- nhc_event_study_results |>
   select(extra_crimes) |>
   unnest(extra_crimes)
 
+# Store the event-study result paths so the same saved files can be checked
+# before the large model files are deleted.
+nhc_event_study_result_files <- tibble(
+  result_file = c(
+    "nhc_coef_event_study.rds",
+    "nhc_stats_event_study.rds",
+    "nhc_extra_event_study.rds"
+  ),
+  result_path = here("derived_data", result_file)
+)
+
 # Save the event-study coefficient summaries.
 write_rds(
   nhc_event_study_coef,
-  here("derived_data", "nhc_coef_event_study.rds"),
+  nhc_event_study_result_files |>
+    filter(result_file == "nhc_coef_event_study.rds") |>
+    pull(result_path),
   compress = "gz"
 )
 
 # Save the event-study model-statistic summaries.
 write_rds(
   nhc_event_study_stats,
-  here("derived_data", "nhc_stats_event_study.rds"),
+  nhc_event_study_result_files |>
+    filter(result_file == "nhc_stats_event_study.rds") |>
+    pull(result_path),
   compress = "gz"
 )
 
 # Save the event-study extra-crime summaries.
 write_rds(
   nhc_event_study_extra,
-  here("derived_data", "nhc_extra_event_study.rds"),
+  nhc_event_study_result_files |>
+    filter(result_file == "nhc_extra_event_study.rds") |>
+    pull(result_path),
   compress = "gz"
 )
+
+# Check each saved event-study result file for missing values before deciding
+# whether it is safe to remove the reusable model objects.
+nhc_event_study_missing_values <- nhc_event_study_result_files |>
+  mutate(
+    missing_values = map_int(
+      result_path,
+      \(result_path) {
+        read_rds(result_path) |>
+          count_missing_values()
+      }
+    )
+  ) |>
+  filter(missing_values > 0)
+
+# Remove the saved event-study model objects only if every saved result file is
+# complete, otherwise keep the models so the extraction can be investigated
+# without re-estimating the expensive fixed-effects models.
+if (nrow(nhc_event_study_missing_values) == 0) {
+  unlink(nhc_event_study_model_files$model_path)
+} else {
+  cli_warn(c(
+    "Event-study model files were kept because missing values were found in the saved result files.",
+    set_names(
+      str_c(
+        nhc_event_study_missing_values$missing_values,
+        " missing value",
+        if_else(
+          nhc_event_study_missing_values$missing_values == 1,
+          "",
+          "s"
+        ),
+        " in ",
+        nhc_event_study_missing_values$result_file,
+        "."
+      ),
+      rep("x", nrow(nhc_event_study_missing_values))
+    )
+  ))
+}
+
+# EXTENDED CRIMINAL-DAMAGE EVENT STUDY -------------------------------------
+
+# Store the extended event-study labels from 10 days before Carnival Monday to
+# three days after Carnival Monday.
+nhc_criminal_damage_extended_event_days <- tibble(
+  event_day_offset = -10:3,
+  nhc_extended_event_day = c(
+    "ten_days_before",
+    "nine_days_before",
+    "eight_days_before",
+    "seven_days_before",
+    "six_days_before",
+    "five_days_before",
+    "four_days_before",
+    "three_days_before",
+    "two_days_before",
+    "carnival_sunday",
+    "carnival_monday",
+    "one_day_after",
+    "two_days_after",
+    "three_days_after"
+  )
+)
+
+# Update the event-study factor levels for the extended criminal-damage model,
+# keeping all dates outside the extended window as the omitted reference period.
+nhc_event_day_levels <- c(
+  "outside_window",
+  nhc_criminal_damage_extended_event_days$nhc_extended_event_day
+)
+
+# Create one row for every date in the extended event-study window around each
+# real Carnival Monday in the panel.
+nhc_criminal_damage_extended_window_dates <- nhc_panel |>
+  distinct(crime_date, nhc_monday) |>
+  filter(nhc_monday == 1) |>
+  transmute(
+    nhc_year = year(crime_date),
+    nhc_monday_date = crime_date
+  ) |>
+  expand_grid(nhc_criminal_damage_extended_event_days) |>
+  transmute(
+    crime_date = nhc_monday_date + days(event_day_offset),
+    nhc_year = nhc_year,
+    event_day_offset = event_day_offset,
+    nhc_extended_event_day = nhc_extended_event_day
+  )
+
+# Add the extended event-study label to the criminal-damage panel using the same
+# event-day column name as the main event-study helper functions.
+nhc_event_panel <- nhc_panel |>
+  filter(crime_group == "criminal_damage") |>
+  left_join(
+    nhc_criminal_damage_extended_window_dates,
+    by = join_by(crime_date)
+  ) |>
+  mutate(
+    nhc_event_day = replace_na(
+      nhc_extended_event_day,
+      "outside_window"
+    ),
+    nhc_event_day = factor(
+      nhc_event_day,
+      levels = nhc_event_day_levels
+    )
+  ) |>
+  select(-nhc_extended_event_day)
+
+# Store the extended event-window days that are explicitly estimated in the
+# criminal-damage model.
+nhc_event_days <- nhc_event_day_levels |>
+  setdiff("outside_window")
+
+# Store the path for the extended criminal-damage event-study model so the
+# script can resume without re-estimating the model if it already exists.
+nhc_criminal_damage_extended_model_file <- here(
+  "derived_data",
+  "nhc_model_event_study_criminal_damage_extended.rds"
+)
+
+# Estimate and save the extended criminal-damage model only if a saved copy is
+# not already available.
+if (!file.exists(nhc_criminal_damage_extended_model_file)) {
+  fit_nhc_event_study_model(
+    "criminal_damage",
+    nhc_criminal_damage_extended_model_file
+  )
+}
+
+# Load and process the extended criminal-damage model using the same extraction
+# workflow as the main event-study models.
+nhc_criminal_damage_extended_results <- process_nhc_event_study_model(
+  "criminal_damage",
+  nhc_criminal_damage_extended_model_file
+)
+
+# Unnest the extended criminal-damage coefficient summaries into one tidy table.
+nhc_criminal_damage_extended_coef <- nhc_criminal_damage_extended_results |>
+  select(coefficients) |>
+  unnest(coefficients) |>
+  arrange(term)
+
+# Unnest the extended criminal-damage model-statistic summaries into one tidy
+# table.
+nhc_criminal_damage_extended_stats <- nhc_criminal_damage_extended_results |>
+  select(model_stats) |>
+  unnest(model_stats) |>
+  mutate(
+    event_window_start = -10,
+    event_window_end = 3,
+    .after = crime_group
+  ) |>
+  arrange(crime_group)
+
+# Unnest the extended criminal-damage extra-crime summaries into one tidy table.
+nhc_criminal_damage_extended_extra <- nhc_criminal_damage_extended_results |>
+  select(extra_crimes) |>
+  unnest(extra_crimes)
+
+# Store the extended criminal-damage result paths so the saved files can be
+# checked before removing the large model object.
+nhc_criminal_damage_extended_result_files <- tibble(
+  result_file = c(
+    "nhc_coef_event_study_criminal_damage_extended.rds",
+    "nhc_stats_event_study_criminal_damage_extended.rds",
+    "nhc_extra_event_study_criminal_damage_extended.rds"
+  ),
+  result_path = here("derived_data", result_file)
+)
+
+# Save the extended criminal-damage coefficient summaries.
+write_rds(
+  nhc_criminal_damage_extended_coef,
+  nhc_criminal_damage_extended_result_files |>
+    filter(
+      result_file == "nhc_coef_event_study_criminal_damage_extended.rds"
+    ) |>
+    pull(result_path),
+  compress = "gz"
+)
+
+# Save the extended criminal-damage model-statistic summaries.
+write_rds(
+  nhc_criminal_damage_extended_stats,
+  nhc_criminal_damage_extended_result_files |>
+    filter(
+      result_file == "nhc_stats_event_study_criminal_damage_extended.rds"
+    ) |>
+    pull(result_path),
+  compress = "gz"
+)
+
+# Save the extended criminal-damage extra-crime summaries.
+write_rds(
+  nhc_criminal_damage_extended_extra,
+  nhc_criminal_damage_extended_result_files |>
+    filter(
+      result_file == "nhc_extra_event_study_criminal_damage_extended.rds"
+    ) |>
+    pull(result_path),
+  compress = "gz"
+)
+
+# Check the extended criminal-damage result files for missing values before
+# deciding whether the reusable model object can be removed.
+nhc_criminal_damage_extended_missing_values <-
+  nhc_criminal_damage_extended_result_files |>
+    mutate(
+      missing_values = map_int(
+        result_path,
+        \(result_path) {
+          read_rds(result_path) |>
+            count_missing_values()
+        }
+      )
+    ) |>
+    filter(missing_values > 0)
+
+# Remove the extended criminal-damage model object only if every saved result
+# file is complete.
+if (nrow(nhc_criminal_damage_extended_missing_values) == 0) {
+  unlink(nhc_criminal_damage_extended_model_file)
+} else {
+  cli_warn(c(
+    str_c(
+      "Extended criminal-damage event-study model file was kept because",
+      " missing values were found in the saved result files."
+    ),
+    set_names(
+      str_c(
+        nhc_criminal_damage_extended_missing_values$missing_values,
+        " missing value",
+        if_else(
+          nhc_criminal_damage_extended_missing_values$missing_values == 1,
+          "",
+          "s"
+        ),
+        " in ",
+        nhc_criminal_damage_extended_missing_values$result_file,
+        "."
+      ),
+      rep("x", nrow(nhc_criminal_damage_extended_missing_values))
+    )
+  ))
+}
