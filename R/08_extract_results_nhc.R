@@ -117,6 +117,19 @@ nhc_crime_groups |>
     nhc_day_data <- nhc_panel |>
       filter(crime_group == crime_group_name, is_nhc == 1)
 
+    # Calculate the mean observed daily crime count on non-Carnival days in
+    # each distance band for the current crime group.
+    non_nhc_observed_results <- nhc_panel |>
+      filter(crime_group == crime_group_name, is_nhc == 0) |>
+      summarise(
+        daily_crime_count = sum(crime_count),
+        .by = c(crime_date, dist_km, dist)
+      ) |>
+      summarise(
+        observed_non_nhc = mean(daily_crime_count),
+        .by = c(dist_km, dist)
+      )
+
     # Convert estimates across all carnival days in the data to estimates for a
     # single annual two-day occurrence of Carnival.
     carnival_annual_scale <- 2 / n_distinct(nhc_day_data$crime_date)
@@ -179,6 +192,13 @@ nhc_crime_groups |>
           qnorm(0.975) * extra_crimes_se,
         extra_crimes_conf_high = extra_crimes +
           qnorm(0.975) * extra_crimes_se
+      ) |>
+      # Add the observed non-Carnival daily crime count to match the observed
+      # Carnival count already included in the results.
+      left_join(
+        non_nhc_observed_results,
+        by = join_by(dist_km, dist),
+        unmatched = "error"
       )
 
     # Store the model terms that contribute uncertainty to the London-wide total.
@@ -220,6 +240,7 @@ nhc_crime_groups |>
           extra_crimes_conf_high = extra_crimes +
             qnorm(0.975) * total_extra_crimes_se,
           observed_nhc = sum(observed_nhc),
+          observed_non_nhc = sum(observed_non_nhc),
           predicted_nhc = sum(predicted_nhc),
           predicted_no_nhc = sum(predicted_no_nhc)
         )
@@ -233,6 +254,7 @@ nhc_crime_groups |>
         extra_crimes_conf_low,
         extra_crimes_conf_high,
         observed_nhc,
+        observed_non_nhc,
         predicted_nhc,
         predicted_no_nhc
       ) |>
@@ -762,4 +784,3 @@ nhc_crime_groups |>
       compress = "gz"
     )
   })
-
