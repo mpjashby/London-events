@@ -21,6 +21,19 @@ nhc_crime_groups <- nhc_panel |>
   pull(crime_group) |>
   as.character()
 
+# FILTER MODEL DATA ---------------------------------------------------------
+
+# Keep the requested crime group, limiting sexual-offence robustness checks to
+# the years with usable geographic co-ordinates.
+filter_nhc_model_panel <- function(panel_data, crime_type) {
+  panel_data |>
+    filter(
+      crime_group == crime_type,
+      crime_type != "sexual_offences" |
+        between(year(crime_date), 2013, 2019)
+    )
+}
+
 # IDENTIFY CRIME GROUPS TO CHECK -------------------------------------------
 
 # Keep only the main combined-Carnival coefficient files, excluding the
@@ -64,15 +77,6 @@ if (nrow(nhc_leave_one_out_crime_groups) == 0) {
   quit(save = "no", status = 0)
 }
 
-# Identify the Carnival years represented in the panel. Carnival was not held
-# in its usual form in 2020 or 2021, so those years are not present here because
-# is_nhc is zero for those dates in the panel-building script.
-nhc_years <- nhc_panel |>
-  filter(is_nhc == 1) |>
-  distinct(omitted_year = year(crime_date)) |>
-  arrange(omitted_year) |>
-  pull(omitted_year)
-
 # Use a conservative number of workers because each fixed-effects model can use
 # a large amount of memory while it is being estimated and saved.
 nhc_leave_one_out_workers <- min(3L, max(1L, as.integer(availableCores()) - 1L))
@@ -93,29 +97,33 @@ dir.create(nhc_leave_one_out_model_dir, recursive = TRUE, showWarnings = FALSE)
 # that calendar year, so each refit tests whether the main estimate is sensitive
 # to the presence of that year's observations.
 fit_nhc_leave_one_out_model <- function(crime_type, omitted_year) {
-  model_data <- nhc_panel |>
-    filter(
-      crime_group == crime_type,
-      year(crime_date) != omitted_year
-    )
-
-  model <- fepois(
-    crime_count ~ i(dist, is_nhc, ref = "12km") | hex_id + crime_date,
-    data = model_data,
-    cluster = ~hex_id
-  )
-
+  # Store the path for the omitted-year model before estimating so existing
+  # model files can be reused.
   model_path <- file.path(
     nhc_leave_one_out_model_dir,
     str_glue("nhc_model_leave_one_out_{crime_type}_omit_{omitted_year}.rds")
   )
 
-  # Save each fitted model before extracting summaries, then remove the saved
-  # file after extraction so the robustness run does not leave many large model
-  # objects on disk.
-  write_rds(model, model_path, compress = "gz")
-  saved_model <- read_rds(model_path)
-  rm(model)
+  # Load the omitted-year model if it is already available on disk.
+  if (file.exists(model_path)) {
+    saved_model <- read_rds(model_path)
+  } else {
+    # Fit and save the omitted-year model only if it is not already available on
+    # disk.
+    model_data <- nhc_panel |>
+      filter_nhc_model_panel(crime_type) |>
+      filter(year(crime_date) != omitted_year)
+
+    model <- fepois(
+      crime_count ~ i(dist, is_nhc, ref = "12km") | hex_id + crime_date,
+      data = model_data,
+      cluster = ~hex_id
+    )
+
+    write_rds(model, model_path, compress = "gz")
+    rm(model)
+    saved_model <- read_rds(model_path)
+  }
 
   coef_results <- tidy(
     saved_model,
@@ -172,10 +180,23 @@ fit_nhc_leave_one_out_model <- function(crime_type, omitted_year) {
 
 # RUN LEAVE-ONE-OUT MODELS --------------------------------------------------
 
-nhc_leave_one_out_grid <- expand_grid(
-  crime_group = nhc_leave_one_out_crime_groups$crime_group,
-  omitted_year = nhc_years
-)
+# Create a crime-specific omitted-year grid so sexual-offence models only omit
+# Carnival years from 2013 to 2019.
+nhc_leave_one_out_grid <- nhc_leave_one_out_crime_groups |>
+  select(crime_group) |>
+  mutate(
+    omitted_year = map(
+      crime_group,
+      \(crime_group) {
+        filter_nhc_model_panel(nhc_panel, crime_group) |>
+          filter(is_nhc == 1) |>
+          distinct(omitted_year = year(crime_date)) |>
+          arrange(omitted_year) |>
+          pull(omitted_year)
+      }
+    )
+  ) |>
+  unnest(omitted_year)
 
 if (supportsMulticore()) {
   plan(multicore, workers = nhc_leave_one_out_workers)
@@ -285,4 +306,3 @@ nhc_leave_one_out_model_files <- list.files(
   full.names = TRUE
 )
 unlink(nhc_leave_one_out_model_files)
-

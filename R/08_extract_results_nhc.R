@@ -24,6 +24,19 @@ nhc_crime_groups <- nhc_panel |>
   pull(crime_group) |>
   as.character()
 
+# FILTER MODEL DATA ---------------------------------------------------------
+
+# Keep the requested crime group, limiting sexual-offence model summaries and
+# predictions to the years with usable geographic co-ordinates.
+filter_nhc_model_panel <- function(panel_data, crime_group_name) {
+  panel_data |>
+    filter(
+      crime_group == crime_group_name,
+      crime_group_name != "sexual_offences" |
+        between(year(crime_date), 2013, 2019)
+    )
+}
+
 # EXTRACT RESULTS -----------------------------------------------------------
 
 # Extract and save results for each fitted crime-type model.
@@ -113,14 +126,18 @@ nhc_crime_groups |>
       compress = "gz"
     )
 
+    # Keep the panel rows that correspond to the modelled years for the current
+    # crime group.
+    nhc_model_panel <- filter_nhc_model_panel(nhc_panel, crime_group_name)
+
     # Keep the carnival-day rows for the current crime group.
-    nhc_day_data <- nhc_panel |>
-      filter(crime_group == crime_group_name, is_nhc == 1)
+    nhc_day_data <- nhc_model_panel |>
+      filter(is_nhc == 1)
 
     # Calculate the mean observed daily crime count on non-Carnival days in
     # each distance band for the current crime group.
-    non_nhc_observed_results <- nhc_panel |>
-      filter(crime_group == crime_group_name, is_nhc == 0) |>
+    non_nhc_observed_results <- nhc_model_panel |>
+      filter(is_nhc == 0) |>
       summarise(
         daily_crime_count = sum(crime_count),
         .by = c(crime_date, dist_km, dist)
@@ -389,17 +406,18 @@ nhc_crime_groups |>
     # can account for covariance between distance-band coefficients.
     nhc_day_model_vcov <- vcov(nhc_day_model)
 
+    # Keep the panel rows that correspond to the day-specific modelled years for
+    # the current crime group.
+    nhc_day_model_panel <- filter_nhc_model_panel(nhc_panel, crime_group_name)
+
     # Estimate day-specific additional crimes predicted by distance band.
     day_extra_results <- map2(
       nhc_day_model_types$carnival_day,
       nhc_day_model_types$carnival_indicator,
       function(day_label, day_indicator) {
           # Keep the rows for the current Carnival day and crime group.
-          nhc_day_data <- nhc_panel |>
-            filter(
-              crime_group == crime_group_name,
-              .data[[day_indicator]] == 1
-            )
+          nhc_day_data <- nhc_day_model_panel |>
+            filter(.data[[day_indicator]] == 1)
 
           # Convert estimates across all observed years to estimates for a
           # single annual occurrence of the current Carnival day.

@@ -79,6 +79,17 @@ nhc_event_panel <- nhc_panel |>
     nhc_event_day = factor(nhc_event_day, levels = nhc_event_day_levels)
   )
 
+# Keep the requested crime group, limiting sexual-offence event-study models to
+# the years with usable geographic co-ordinates.
+filter_nhc_event_panel <- function(panel_data, crime_type) {
+  panel_data |>
+    filter(
+      crime_group == crime_type,
+      crime_type != "sexual_offences" |
+        between(year(crime_date), 2013, 2019)
+    )
+}
+
 # Store the event-window days that are explicitly estimated in the model.
 nhc_event_days <- nhc_event_day_levels |>
   setdiff("outside_window")
@@ -115,10 +126,16 @@ count_missing_values <- function(result_object) {
 # Estimate the event-study fixed-effects Poisson model for one crime type at a
 # time and save it to the supplied model path.
 fit_nhc_event_study_model <- function(crime_type, model_path) {
+  # Skip estimation when the fitted event-study model is already available on
+  # disk.
+  if (file.exists(model_path)) {
+    return(tibble(crime_group = crime_type, model_path = model_path))
+  }
+
   # Keep the rows for the requested crime type so each model has the same
   # specification but a different outcome subset.
   model_data <- nhc_event_panel |>
-    filter(crime_group == crime_type)
+    filter_nhc_event_panel(crime_type)
 
   # Estimate distance-band effects separately for each day in the event window,
   # using the 12-kilometre band and all outside-window dates as references.
@@ -152,6 +169,7 @@ nhc_event_study_model_files <- tibble(
     str_glue("nhc_model_event_study_{nhc_crime_groups}.rds")
   )
 ) |>
+  # Record whether each event-study model already exists on disk.
   mutate(model_exists = file.exists(model_path))
 
 # Estimate and save only the event-study models that are not already present in
@@ -203,6 +221,13 @@ process_nhc_event_study_model <- function(crime_group_name, model_path) {
   # zero.
   nhc_event_day_test <- wald(saved_model, keep = "nhc_event_day")
 
+  # Test whether the estimated pre-Carnival coefficients are jointly equal to
+  # zero, as a no-anticipation check for the event-study specification.
+  nhc_no_anticipation_test <- wald(
+    saved_model,
+    keep = "thursday_before|friday_before|saturday_before"
+  )
+
   # Store model-level statistics that are useful for manuscript tables and
   # appendix reporting.
   stats_results <- tibble(
@@ -224,14 +249,19 @@ process_nhc_event_study_model <- function(crime_group_name, model_path) {
     joint_event_window_test_p_value = unname(nhc_event_day_test$p),
     joint_event_window_test_df1 = unname(nhc_event_day_test$df1),
     joint_event_window_test_df2 = unname(nhc_event_day_test$df2),
-    joint_event_window_test_vcov = nhc_event_day_test$vcov
+    joint_event_window_test_vcov = nhc_event_day_test$vcov,
+    no_anticipation_test_statistic = unname(nhc_no_anticipation_test$stat),
+    no_anticipation_test_p_value = unname(nhc_no_anticipation_test$p),
+    no_anticipation_test_df1 = unname(nhc_no_anticipation_test$df1),
+    no_anticipation_test_df2 = unname(nhc_no_anticipation_test$df2),
+    no_anticipation_test_vcov = nhc_no_anticipation_test$vcov
   )
 
   # Keep only the event-window rows for the current crime group because
   # outside-window dates are the counterfactual baseline.
   event_day_data <- nhc_event_panel |>
+    filter_nhc_event_panel(crime_group_name) |>
     filter(
-      crime_group == crime_group_name,
       nhc_event_day %in% nhc_event_days
     )
 

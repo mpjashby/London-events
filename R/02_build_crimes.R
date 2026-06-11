@@ -62,6 +62,8 @@ crimes_2019 <- c(
     date_committed_to,
     new_major_text,
     new_minor_text,
+    # Keep offence-method text where the raw file includes this field.
+    any_of("method"),
     offences,
     easting = x,
     northing = y
@@ -85,6 +87,8 @@ crimes_2021 <- c(
     date_committed_to,
     new_major_text,
     new_minor_text,
+    # Keep offence-method text where the raw file includes this field.
+    any_of("method"),
     offences,
     easting = x,
     northing = y
@@ -108,6 +112,8 @@ crimes_2022 <- c(
     date_committed_to,
     new_major_text,
     new_minor_text,
+    # Keep offence-method text where the raw file includes this field.
+    any_of("method"),
     offences,
     easting = x,
     northing = y
