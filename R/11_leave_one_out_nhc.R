@@ -7,7 +7,16 @@ mem.maxVSize(mem.maxVSize() * 4)
 
 # Load the packages needed to estimate fixed-effects count models, extract
 # coefficients and handle the panel data.
-pacman::p_load(broom, fixest, furrr, future, here, janitor, parallelly, tidyverse)
+pacman::p_load(
+  broom,
+  fixest,
+  furrr,
+  future,
+  here,
+  janitor,
+  parallelly,
+  tidyverse
+)
 
 # LOAD PANEL DATA -----------------------------------------------------------
 
@@ -36,9 +45,12 @@ filter_nhc_model_panel <- function(panel_data, crime_type) {
 
 # IDENTIFY CRIME GROUPS TO CHECK -------------------------------------------
 
-# Keep only the main combined-Carnival coefficient files, excluding the
-# day-specific and placebo coefficient files.
-nhc_coef_files <- here("derived_data", str_glue("nhc_coef_{nhc_crime_groups}.rds"))
+# Keep only the main combined-Carnival coefficient files, excluding placebo and
+# other supplementary coefficient files.
+nhc_coef_files <- here(
+  "derived_data",
+  str_glue("nhc_coef_{nhc_crime_groups}.rds")
+)
 names(nhc_coef_files) <- nhc_crime_groups
 nhc_coef_files <- nhc_coef_files[file.exists(nhc_coef_files)]
 
@@ -73,7 +85,9 @@ write_rds(
 # Stop early with an informative message if none of the main footprint effects
 # meet the significance criterion.
 if (nrow(nhc_leave_one_out_crime_groups) == 0) {
-  message("No crime groups had a significant 0 km Carnival effect; no leave-one-out models run.")
+  message(
+    "No crime groups had a significant 0 km Carnival effect; no leave-one-out models run."
+  )
   quit(save = "no", status = 0)
 }
 
@@ -249,7 +263,9 @@ nhc_leave_one_out_footprint <- nhc_leave_one_out_coef |>
     exponentiated_conf_high = exp(conf.high),
     main_exponentiated_estimate = exp(main_estimate),
     estimate_change_from_main = estimate - main_estimate,
-    percent_change_from_main = 100 * (estimate - main_estimate) / abs(main_estimate),
+    percent_change_from_main = 100 *
+      (estimate - main_estimate) /
+      abs(main_estimate),
     significant = p.value < 0.05,
     same_sign_as_main = sign(estimate) == sign(main_estimate)
   ) |>

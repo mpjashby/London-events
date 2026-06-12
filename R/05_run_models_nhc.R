@@ -38,8 +38,7 @@ filter_nhc_model_panel <- function(panel_data, crime_type) {
   panel_data |>
     filter(
       crime_group == crime_type,
-      crime_type != "sexual_offences" |
-        between(year(crime_date), 2013, 2019)
+      crime_type != "sexual_offences" | between(year(crime_date), 2013, 2019)
     )
 }
 
@@ -99,72 +98,6 @@ nhc_model_files <- nhc_crime_groups |>
   list_rbind()
 
 # Return the future backend to sequential processing after the model run.
-plan(sequential)
-
-# MODEL FUNCTION FOR SEPARATE CARNIVAL DAYS --------------------------------
-
-# Estimate a fixed-effects Poisson model with separate distance-band effects
-# for Carnival Sunday and Carnival Monday.
-fit_nhc_day_model <- function(crime_type) {
-  # Store the path for the saved day-specific model before estimating so
-  # existing model files can be reused.
-  model_path <- here("derived_data", str_glue("nhc_model_day_{crime_type}.rds"))
-
-  # Skip estimation when the fitted day-specific model is already available on
-  # disk.
-  if (file.exists(model_path)) {
-    return(tibble(crime_group = crime_type, model_path = model_path))
-  }
-
-  # Keep the rows for the requested crime type so the Sunday/Monday model uses
-  # the same outcome subset as the combined Carnival-day model.
-  model <- fepois(
-    crime_count ~
-      i(dist, nhc_sunday, ref = "12km") +
-      i(dist, nhc_monday, ref = "12km") |
-      hex_id + crime_date,
-    data = filter_nhc_model_panel(nhc_panel, crime_type),
-    cluster = ~hex_id
-  )
-
-  # Save the fitted model using compression because the fixed-effects model
-  # objects are large.
-  write_rds(model, model_path, compress = "gz")
-
-  # Clean up memory used by the day-specific model fit inside the worker
-  # process.
-  gc()
-
-  # Return a lightweight summary so the parent process does not collect all
-  # fitted day-specific model objects in memory.
-  tibble(crime_group = crime_type, model_path = model_path)
-}
-
-# RUN SEPARATE CARNIVAL-DAY MODELS -----------------------------------------
-
-# Fit multiple Sunday/Monday models at the same time using the same cautious
-# worker-count strategy as the combined Carnival-day models.
-if (supportsMulticore()) {
-  # Use forked workers when available so the large panel can be shared more
-  # efficiently between worker processes.
-  plan(multicore, workers = nhc_model_workers)
-} else {
-  # Use socket workers when forked workers are not supported by the local R
-  # session.
-  plan(multisession, workers = nhc_model_workers)
-}
-
-# Estimate and save one Sunday/Monday fixed-effects Poisson model for each
-# crime group in the panel dataset.
-nhc_day_model_files <- nhc_crime_groups |>
-  future_map(
-    fit_nhc_day_model,
-    .options = furrr_options(seed = NULL)
-  ) |>
-  list_rbind()
-
-# Return the future backend to sequential processing after the day-specific
-# model run.
 plan(sequential)
 
 # PLACEBO CARNIVAL DATES ----------------------------------------------------
